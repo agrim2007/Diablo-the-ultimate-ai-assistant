@@ -117,8 +117,14 @@ class JarvisAgent:
             raw = audio.get_raw_data(convert_rate=16000, convert_width=2)
             samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
             segments, _ = model.transcribe(samples, beam_size=5)
-            text = " ".join(seg.text for seg in segments).strip()
+            try:
+                text = " ".join(seg.text for seg in segments).strip()
+            except KeyboardInterrupt:
+                segments.close() if hasattr(segments, 'close') else None
+                return ""
             return text.lower()
+        except KeyboardInterrupt:
+            return ""
         except Exception as e:
             print(f"? Whisper transcription error: {e}")
             return ""
