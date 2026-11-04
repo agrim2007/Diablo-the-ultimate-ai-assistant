@@ -8,7 +8,6 @@ import json
 import subprocess
 import webbrowser
 import platform
-import tempfile
 import yaml
 import contextlib
 import pyttsx3
@@ -26,13 +25,20 @@ except ImportError:
 @contextlib.contextmanager
 def suppress_c_stderr():
     """Suppress C-level stderr (e.g., ALSA / PyAudio warning spam)."""
+    import contextlib as _ctx
+    # Redirect OS-level file descriptor 2 to /dev/null
     devnull = os.open(os.devnull, os.O_WRONLY)
     old_stderr_fd = os.dup(2)
     os.dup2(devnull, 2)
     os.close(devnull)
+    # Also redirect Python-level stderr
+    old_stderr = sys.stderr
+    sys.stderr = open(os.devnull, "w")
     try:
-        yield
+        with _ctx.redirect_stderr(sys.stderr):
+            yield
     finally:
+        sys.stderr = old_stderr
         os.dup2(old_stderr_fd, 2)
         os.close(old_stderr_fd)
 
@@ -106,15 +112,12 @@ class JarvisAgent:
         if model is None:
             return ""
         try:
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                f.write(audio.get_wav_data(convert_rate=16000))
-                temp_path = f.name
-            segments, _ = model.transcribe(temp_path, beam_size=5)
+            import numpy as np
+            # Convert speech_recognition AudioData to numpy float32 array
+            raw = audio.get_raw_data(convert_rate=16000, convert_width=2)
+            samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+            segments, _ = model.transcribe(samples, beam_size=5)
             text = " ".join(seg.text for seg in segments).strip()
-            try:
-                os.unlink(temp_path)
-            except Exception:
-                pass
             return text.lower()
         except Exception as e:
             print(f"? Whisper transcription error: {e}")
@@ -132,14 +135,15 @@ class JarvisAgent:
             return ""
 
     def listen(self, timeout=5, phrase_time_limit=7):
-        with self.microphone as source:
-            print("?? Listening...")
-            self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
-            try:
-                audio = self.recognizer.listen(source, timeout=timeout, phrase_time_limit=phrase_time_limit)
-            except sr.WaitTimeoutError:
-                print("?? Listening timed out.")
-                return ""
+        with suppress_c_stderr():
+            with self.microphone as source:
+                print("?? Listening...")
+                self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                try:
+                    audio = self.recognizer.listen(source, timeout=timeout, phrase_time_limit=phrase_time_limit)
+                except sr.WaitTimeoutError:
+                    print("?? Listening timed out.")
+                    return ""
 
         if self.stt_provider == "whisper":
             text = self._transcribe_whisper(audio)
