@@ -8,6 +8,7 @@ import json
 import subprocess
 import webbrowser
 import platform
+import tempfile
 import yaml
 import contextlib
 import pyttsx3
@@ -61,6 +62,11 @@ class JarvisAgent:
         self.llm_model = self.config.get("llm", {}).get("model", "llama3")
         self.llm_base_url = self.config.get("llm", {}).get("base_url", "http://localhost:11434")
 
+        # STT configuration
+        self.stt_provider = self.config.get("stt", {}).get("provider", "whisper")
+        self.whisper_model_name = self.config.get("stt", {}).get("model", "base")
+        self._whisper_model = None
+
         print(f"?? {self.name} initialized.")
         print(f"   Provider: {self.llm_provider}")
         print(f"   Model: {self.llm_model}")
@@ -79,24 +85,73 @@ class JarvisAgent:
             self.tts.say(text)
             self.tts.runAndWait()
 
+    def _get_whisper_model(self):
+        """Lazy-load the Whisper model only when needed."""
+        if self._whisper_model is None:
+            try:
+                from faster_whisper import WhisperModel
+                print(f"? Loading Whisper model '{self.whisper_model_name}' (first-time download may take a moment)...")
+                self._whisper_model = WhisperModel(self.whisper_model_name, compute_type="int8")
+            except ImportError:
+                print("? faster-whisper not installed. Run: pip install faster-whisper")
+                return None
+            except Exception as e:
+                print(f"? Failed to load Whisper model: {e}")
+                return None
+        return self._whisper_model
+
+    def _transcribe_whisper(self, audio):
+        """Transcribe audio using local faster-whisper (offline)."""
+        model = self._get_whisper_model()
+        if model is None:
+            return ""
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                f.write(audio.get_wav_data(convert_rate=16000))
+                temp_path = f.name
+            segments, _ = model.transcribe(temp_path, beam_size=5)
+            text = " ".join(seg.text for seg in segments).strip()
+            try:
+                os.unlink(temp_path)
+            except Exception:
+                pass
+            return text.lower()
+        except Exception as e:
+            print(f"? Whisper transcription error: {e}")
+            return ""
+
+    def _transcribe_google(self, audio):
+        """Transcribe audio using Google Web Speech API (requires internet)."""
+        try:
+            return self.recognizer.recognize_google(audio).lower()
+        except sr.UnknownValueError:
+            print("? Could not understand audio.")
+            return ""
+        except sr.RequestError as e:
+            print(f"? STT service error: {e}")
+            return ""
+
     def listen(self, timeout=5, phrase_time_limit=7):
-        with suppress_c_stderr():
-            with self.microphone as source:
-                self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
-                try:
-                    audio = self.recognizer.listen(source, timeout=timeout, phrase_time_limit=phrase_time_limit)
-                    text = self.recognizer.recognize_google(audio)
-                except sr.WaitTimeoutError:
-                    print("?? Listening timed out.")
-                    return ""
-                except sr.UnknownValueError:
-                    print("? Could not understand audio.")
-                    return ""
-                except sr.RequestError as e:
-                    print(f"? STT service error: {e}")
-                    return ""
-        print(f"?? You: {text}")
-        return text.lower()
+        with self.microphone as source:
+            print("?? Listening...")
+            self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
+            try:
+                audio = self.recognizer.listen(source, timeout=timeout, phrase_time_limit=phrase_time_limit)
+            except sr.WaitTimeoutError:
+                print("?? Listening timed out.")
+                return ""
+
+        if self.stt_provider == "whisper":
+            text = self._transcribe_whisper(audio)
+            # Fall back to Google if Whisper isn't available
+            if not text:
+                text = self._transcribe_google(audio)
+        else:
+            text = self._transcribe_google(audio)
+
+        if text:
+            print(f"?? You: {text}")
+        return text
 
     def ask_llm(self, prompt):
         if self.llm_provider == "ollama":
