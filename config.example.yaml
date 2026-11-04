@@ -1,0 +1,30 @@
+# Jarvis Agent Configuration
+# Copy this file to config.yaml and fill in your own values.
+# Never commit config.yaml — it contains your API keys.
+
+agent:
+  name: "Diablo"
+  voice_id: null
+  rate: 180
+  volume: 1.0
+
+llm:
+  # Providers: ollama | openai | gemini | stub
+  provider: "gemini"
+  # Example Gemini models: gemini-2.0-flash, gemini-1.5-flash, gemini-2.5-flash
+  model: "gemini-2.0-flash"
+  base_url: "http://localhost:11434"
+  openai_api_key: null
+  gemini_api_key: null  # Set GEMINI_API_KEY in your .env file or paste your key here
+
+memory:
+  enabled: false
+  path: "./memory"
+
+system:
+  os: "linux"
+  allow_dangerous_commands: false
+
+wake_word:
+  enabled: true
+  phrase: "hey diablo"

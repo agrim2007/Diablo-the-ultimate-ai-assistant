@@ -7,11 +7,12 @@ import sys
 import json
 import subprocess
 import webbrowser
+import platform
 import yaml
+import contextlib
 import pyttsx3
 import speech_recognition as sr
 import psutil
-import pyautogui
 from datetime import datetime
 
 try:
@@ -21,6 +22,25 @@ except ImportError:
     pass
 
 
+@contextlib.contextmanager
+def suppress_c_stderr():
+    """Suppress C-level stderr (e.g., ALSA / PyAudio warning spam)."""
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    old_stderr_fd = os.dup(2)
+    os.dup2(devnull, 2)
+    os.close(devnull)
+    try:
+        yield
+    finally:
+        os.dup2(old_stderr_fd, 2)
+        os.close(old_stderr_fd)
+
+
+# Try to quiet ALSA at the library level before anything audio-related loads
+os.environ.setdefault("ALSA_PCM_CARD", "default")
+os.environ.setdefault("ALSA_PCM_DEVICE", "0")
+
+
 class JarvisAgent:
     def __init__(self, config_path="config.yaml"):
         self.config = self._load_config(config_path)
@@ -28,18 +48,23 @@ class JarvisAgent:
         self.wake_phrase = self.config.get("wake_word", {}).get("phrase", "hey jarvis").lower()
         self.wake_enabled = self.config.get("wake_word", {}).get("enabled", True)
 
-        self.tts = pyttsx3.init()
+        # Initialize TTS and microphone without ALSA warning spam
+        with suppress_c_stderr():
+            self.tts = pyttsx3.init()
+            self.recognizer = sr.Recognizer()
+            self.microphone = sr.Microphone()
+
         self.tts.setProperty("rate", self.config.get("agent", {}).get("rate", 180))
         self.tts.setProperty("volume", self.config.get("agent", {}).get("volume", 1.0))
-
-        self.recognizer = sr.Recognizer()
-        self.microphone = sr.Microphone()
 
         self.llm_provider = self.config.get("llm", {}).get("provider", "ollama")
         self.llm_model = self.config.get("llm", {}).get("model", "llama3")
         self.llm_base_url = self.config.get("llm", {}).get("base_url", "http://localhost:11434")
 
-        print(f"?? {self.name} initialized. Provider: {self.llm_provider}")
+        print(f"?? {self.name} initialized.")
+        print(f"   Provider: {self.llm_provider}")
+        print(f"   Model: {self.llm_model}")
+        print(f"   Wake word: '{self.wake_phrase}'")
 
     def _load_config(self, path):
         if not os.path.exists(path):
@@ -50,33 +75,36 @@ class JarvisAgent:
 
     def speak(self, text):
         print(f"??? {self.name}: {text}")
-        self.tts.say(text)
-        self.tts.runAndWait()
+        with suppress_c_stderr():
+            self.tts.say(text)
+            self.tts.runAndWait()
 
     def listen(self, timeout=5, phrase_time_limit=7):
-        with self.microphone as source:
-            print("?? Listening...")
-            self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
-            try:
-                audio = self.recognizer.listen(source, timeout=timeout, phrase_time_limit=phrase_time_limit)
-                text = self.recognizer.recognize_google(audio)
-                print(f"?? You: {text}")
-                return text.lower()
-            except sr.WaitTimeoutError:
-                print("?? Listening timed out.")
-                return ""
-            except sr.UnknownValueError:
-                print("? Could not understand audio.")
-                return ""
-            except sr.RequestError as e:
-                print(f"? STT service error: {e}")
-                return ""
+        with suppress_c_stderr():
+            with self.microphone as source:
+                self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                try:
+                    audio = self.recognizer.listen(source, timeout=timeout, phrase_time_limit=phrase_time_limit)
+                    text = self.recognizer.recognize_google(audio)
+                except sr.WaitTimeoutError:
+                    print("?? Listening timed out.")
+                    return ""
+                except sr.UnknownValueError:
+                    print("? Could not understand audio.")
+                    return ""
+                except sr.RequestError as e:
+                    print(f"? STT service error: {e}")
+                    return ""
+        print(f"?? You: {text}")
+        return text.lower()
 
     def ask_llm(self, prompt):
         if self.llm_provider == "ollama":
             return self._ollama_chat(prompt)
         elif self.llm_provider == "openai":
             return self._openai_chat(prompt)
+        elif self.llm_provider == "gemini":
+            return self._gemini_chat(prompt)
         else:
             return self._stub_response(prompt)
 
@@ -113,6 +141,31 @@ class JarvisAgent:
         except Exception as e:
             return f"OpenAI request failed: {e}"
 
+    def _gemini_chat(self, prompt):
+        import requests
+        api_key = (
+            self.config.get("llm", {}).get("gemini_api_key")
+            or os.getenv("GEMINI_API_KEY")
+        )
+        if not api_key:
+            return "Gemini API key not configured. Set GEMINI_API_KEY in .env or gemini_api_key in config.yaml."
+        model = self.llm_model
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+        try:
+            data = {"contents": [{"parts": [{"text": prompt}]}]}
+            resp = requests.post(url, json=data, timeout=60)
+            if resp.status_code == 200:
+                result = resp.json()
+                candidates = result.get("candidates", [])
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    if parts:
+                        return parts[0].get("text", "No response from Gemini.")
+                return "No response from Gemini."
+            return f"Gemini error: {resp.status_code} {resp.text}"
+        except Exception as e:
+            return f"Gemini request failed: {e}"
+
     def _stub_response(self, prompt):
         responses = {
             "hello": f"Hello! I am {self.name}. How can I help you?",
@@ -127,31 +180,83 @@ class JarvisAgent:
 
     def open_app(self, app_name):
         app_name = app_name.lower()
+        system = platform.system()
         try:
-            if "notepad" in app_name:
-                subprocess.Popen(["notepad.exe"])
-                return "Opening Notepad."
-            elif "calculator" in app_name or "calc" in app_name:
-                subprocess.Popen(["calc.exe"])
-                return "Opening Calculator."
-            elif "chrome" in app_name or "browser" in app_name:
-                subprocess.Popen(["chrome.exe"])
-                return "Opening Chrome."
-            elif "command prompt" in app_name or "cmd" in app_name:
-                subprocess.Popen(["cmd.exe"])
-                return "Opening Command Prompt."
-            elif "task manager" in app_name:
-                subprocess.Popen(["taskmgr.exe"])
-                return "Opening Task Manager."
-            else:
-                return f"Sorry, I don't know how to open {app_name}."
+            if system == "Windows":
+                return self._open_app_windows(app_name)
+            elif system == "Darwin":
+                return self._open_app_macos(app_name)
+            else:  # Linux and others
+                return self._open_app_linux(app_name)
         except Exception as e:
             return f"Failed to open {app_name}: {e}"
+
+    def _open_app_windows(self, app_name):
+        if "notepad" in app_name:
+            subprocess.Popen(["notepad.exe"])
+            return "Opening Notepad."
+        elif "calculator" in app_name or "calc" in app_name:
+            subprocess.Popen(["calc.exe"])
+            return "Opening Calculator."
+        elif "chrome" in app_name or "browser" in app_name:
+            subprocess.Popen(["chrome.exe"])
+            return "Opening Chrome."
+        elif "command prompt" in app_name or "cmd" in app_name:
+            subprocess.Popen(["cmd.exe"])
+            return "Opening Command Prompt."
+        elif "task manager" in app_name:
+            subprocess.Popen(["taskmgr.exe"])
+            return "Opening Task Manager."
+        else:
+            return f"Sorry, I don't know how to open {app_name}."
+
+    def _open_app_macos(self, app_name):
+        mapping = {
+            "notepad": "TextEdit",
+            "calculator": "Calculator",
+            "calc": "Calculator",
+            "chrome": "Google Chrome",
+            "browser": "Safari",
+            "command prompt": "Terminal",
+            "cmd": "Terminal",
+            "task manager": "Activity Monitor",
+        }
+        for key, app in mapping.items():
+            if key in app_name:
+                subprocess.Popen(["open", "-a", app])
+                return f"Opening {app}."
+        return f"Sorry, I don't know how to open {app_name}."
+
+    def _open_app_linux(self, app_name):
+        mapping = {
+            "notepad": ["gedit", "mousepad", "leafpad", "nano", "vim"],
+            "calculator": ["gnome-calculator", "kcalc", "qalculate-gtk"],
+            "calc": ["gnome-calculator", "kcalc", "qalculate-gtk"],
+            "chrome": ["google-chrome", "chromium-browser", "chromium", "firefox"],
+            "browser": ["google-chrome", "chromium-browser", "chromium", "firefox"],
+            "command prompt": ["gnome-terminal", "konsole", "xterm", "terminator"],
+            "cmd": ["gnome-terminal", "konsole", "xterm", "terminator"],
+            "task manager": ["gnome-system-monitor", "ksystemguard", "htop"],
+        }
+        for key, candidates in mapping.items():
+            if key in app_name:
+                for cmd in candidates:
+                    try:
+                        subprocess.Popen([cmd])
+                        return f"Opening {cmd}."
+                    except FileNotFoundError:
+                        continue
+                return f"Sorry, I couldn't find a suitable app for {app_name}."
+        return f"Sorry, I don't know how to open {app_name}."
 
     def open_website(self, site):
         site = site.lower().strip()
         if not site.startswith("http"):
-            site = "https://www." + site + ".com"
+            # If it already looks like a domain (has a dot), don't append .com again
+            if "." in site:
+                site = "https://www." + site
+            else:
+                site = "https://www." + site + ".com"
         webbrowser.open(site)
         return f"Opening {site}"
 
@@ -170,9 +275,16 @@ class JarvisAgent:
 
     def handle_command(self, text):
         text = text.lower()
-        if self.wake_enabled and self.wake_phrase not in text:
+        wake_token = None
+        if self.wake_enabled:
+            if self.wake_phrase in text:
+                wake_token = self.wake_phrase
+            elif self.name.lower() in text:
+                # STT often drops the "hey" — accept the agent name alone
+                wake_token = self.name.lower()
+        if wake_token is None:
             return None
-        command = text.replace(self.wake_phrase, "").strip()
+        command = text.replace(wake_token, "", 1).strip()
         if not command:
             return f"Yes, I am listening. How can I help you?"
         if "open" in command:

@@ -1,0 +1,16 @@
+# Secrets & config (never commit real keys)
+config.yaml
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# OS
+.DS_Store
