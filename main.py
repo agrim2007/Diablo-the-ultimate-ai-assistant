@@ -64,6 +64,16 @@ class JarvisAgent:
         self.tts.setProperty("rate", self.config.get("agent", {}).get("rate", 180))
         self.tts.setProperty("volume", self.config.get("agent", {}).get("volume", 1.0))
 
+        # TTS voice selection
+        tts_voice_id = self.config.get("agent", {}).get("voice_id")
+        if tts_voice_id:
+            try:
+                self.tts.setProperty("voice", tts_voice_id)
+            except Exception:
+                pass
+        # List available voices for reference
+        self._available_voices = self.tts.getProperty("voices")
+
         self.llm_provider = self.config.get("llm", {}).get("provider", "ollama")
         self.llm_model = self.config.get("llm", {}).get("model", "llama3")
         self.llm_base_url = self.config.get("llm", {}).get("base_url", "http://localhost:11434")

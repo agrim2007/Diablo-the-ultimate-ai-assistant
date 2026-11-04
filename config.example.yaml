@@ -4,7 +4,7 @@
 
 agent:
   name: "Diablo"
-  voice_id: null
+  voice_id: null  # Set to a voice ID from `python text_mode.py --list-voices` or leave null for default
   rate: 180
   volume: 1.0
 
@@ -34,4 +34,4 @@ stt:
   provider: "whisper"
   # Whisper model sizes: tiny | base | small | medium | large-v3
   # Larger = more accurate but slower and bigger download
-  model: "base"
+  model: "medium"
