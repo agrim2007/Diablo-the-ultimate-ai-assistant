@@ -34,4 +34,4 @@ stt:
   provider: "whisper"
   # Whisper model sizes: tiny | base | small | medium | large-v3
   # Larger = more accurate but slower and bigger download
-  model: "medium"
+  model: "small"
