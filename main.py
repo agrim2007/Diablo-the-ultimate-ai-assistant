@@ -462,6 +462,43 @@ class JarvisAgent:
     def _user_folder(self, folder):
         return os.path.expandvars(f"%USERPROFILE%\\{folder}")
 
+    def _normalize_name(self, name):
+        """Lowercase and strip special chars so voice-transcribed names match real files."""
+        name = name.lower()
+        name = name.replace("&", " and ")
+        for ch in ["_", "-", ".", "(", ")", ",", "!", "@", "#", "$", "%", "^", "*", "+", "=", "{", "}", "[", "]", "|", "\\", ":", ";", "\"", "'", "<", ">", "?", "/"]:
+            name = name.replace(ch, " ")
+        return " ".join(name.split())
+
+    def _find_file_by_name(self, folders, target):
+        """Search folders for a file whose normalized name matches normalized target."""
+        target_norm = self._normalize_name(target)
+        if not target_norm:
+            return None
+        for folder in folders:
+            if not os.path.isdir(folder):
+                continue
+            try:
+                entries = os.listdir(folder)
+            except Exception:
+                continue
+            best = None
+            best_len = 0
+            for fname in entries:
+                fpath = os.path.join(folder, fname)
+                if not os.path.isfile(fpath):
+                    continue
+                stem = os.path.splitext(fname)[0]
+                stem_norm = self._normalize_name(stem)
+                if stem_norm == target_norm:
+                    return fpath  # exact normalized match — return immediately
+                if target_norm in stem_norm and len(stem_norm) > best_len:
+                    best = fpath
+                    best_len = len(stem_norm)
+            if best:
+                return best
+        return None
+
     def open_file_from_location(self, location, filename):
         # Full absolute path given directly — open it as-is
         if os.path.isabs(filename) or (":" in filename) or ("\\" in filename):
@@ -472,12 +509,17 @@ class JarvisAgent:
         if not os.path.exists(filepath):
             if os.path.isabs(filename) or (":" in filename) or ("\\" in filename):
                 return f"Sorry, I couldn't find that file at {filename}."
-            for ext in [".pdf", ".docx", ".doc", ".txt", ".xlsx", ".pptx", ".jpg", ".png", ".zip", ".mp4", ".mp3"]:
-                if os.path.exists(filepath + ext):
-                    filepath = filepath + ext
-                    break
+            # Fuzzy match: ignore &, _, -, (, ), etc. between spoken name and real filename
+            fuzzy = self._find_file_by_name([os.path.dirname(filepath)], filename)
+            if fuzzy:
+                filepath = fuzzy
             else:
-                return f"Sorry, I couldn't find {filename} in {location}."
+                for ext in [".pdf", ".docx", ".doc", ".txt", ".xlsx", ".pptx", ".jpg", ".png", ".zip", ".mp4", ".mp3"]:
+                    if os.path.exists(filepath + ext):
+                        filepath = filepath + ext
+                        break
+                else:
+                    return f"Sorry, I couldn't find {filename} in {location}."
         try:
             os.startfile(filepath)
             return f"Opening {os.path.basename(filepath)} from {location}."
@@ -576,20 +618,7 @@ class JarvisAgent:
                 self._user_folder("Downloads"),
                 self._user_folder("Documents"),
             ]
-            found_file = None
-            for folder in common_folders:
-                if not os.path.isdir(folder):
-                    continue
-                fp = os.path.join(folder, cmd)
-                if os.path.exists(fp):
-                    found_file = fp
-                    break
-                for ext in [".pdf", ".docx", ".doc", ".txt", ".xlsx", ".pptx", ".jpg", ".png", ".zip", ".mp4", ".mp3"]:
-                    if os.path.exists(fp + ext):
-                        found_file = fp + ext
-                        break
-                if found_file:
-                    break
+            found_file = self._find_file_by_name(common_folders, cmd)
             if found_file:
                 try:
                     os.startfile(found_file)
