@@ -459,13 +459,20 @@ class JarvisAgent:
         except Exception as e:
             return f"Failed to open app: {e}"
 
-    def _user_folder(self, folder):
-        # Windows OneDrive may redirect Desktop/Downloads/Documents — try both
+    def _user_folders(self, folder):
+        """Auto-detect: return all existing paths for a folder (OneDrive redirected or regular)."""
+        paths = []
         default_path = os.path.expandvars(f"%USERPROFILE%\\{folder}")
         onedrive_path = os.path.expandvars(f"%USERPROFILE%\\OneDrive\\{folder}")
-        if os.path.isdir(onedrive_path):
-            return onedrive_path
-        return default_path
+        for p in [onedrive_path, default_path]:
+            if os.path.isdir(p) and p not in paths:
+                paths.append(p)
+        return paths
+
+    def _user_folder(self, folder):
+        """Backward compat: return first existing path (OneDrive preferred)."""
+        folders = self._user_folders(folder)
+        return folders[0] if folders else os.path.expandvars(f"%USERPROFILE%\\{folder}")
 
     def _normalize_name(self, name):
         """Lowercase and strip special chars so voice-transcribed names match real files."""
@@ -506,14 +513,17 @@ class JarvisAgent:
         # Full absolute path given directly — open it as-is
         if os.path.isabs(filename) or (":" in filename) or ("\\" in filename):
             filepath = filename
+            candidate_paths = [os.path.dirname(filename)]
         else:
-            folder = self._user_folder("Desktop" if location == "desktop" else "Downloads")
+            candidate_paths = self._user_folders("Desktop" if location == "desktop" else "Downloads")
+            folder = candidate_paths[0] if candidate_paths else self._user_folder("Desktop" if location == "desktop" else "Downloads")
             filepath = os.path.join(folder, filename)
         if not os.path.exists(filepath):
             if os.path.isabs(filename) or (":" in filename) or ("\\" in filename):
                 return f"Sorry, I couldn't find that file at {filename}."
             # Fuzzy match: ignore &, _, -, (, ), etc. between spoken name and real filename
-            fuzzy_matches = self._find_file_by_name([os.path.dirname(filepath)], filename)
+            # Search ALL candidate paths (OneDrive + regular) so nothing is missed
+            fuzzy_matches = self._find_file_by_name(candidate_paths, filename)
             if len(fuzzy_matches) == 1:
                 filepath = fuzzy_matches[0]
             elif len(fuzzy_matches) > 1:
@@ -619,11 +629,10 @@ class JarvisAgent:
                 return self.open_latest_downloads()
 
             # 1b) Plain filename — search common user folders (Desktop, Downloads, Documents)
-            common_folders = [
-                self._user_folder("Desktop"),
-                self._user_folder("Downloads"),
-                self._user_folder("Documents"),
-            ]
+            # Auto-detect OneDrive vs regular — include ALL candidate paths so nothing is missed
+            common_folders = []
+            for folder_name in ["Desktop", "Downloads", "Documents"]:
+                common_folders.extend(self._user_folders(folder_name))
             found_files = self._find_file_by_name(common_folders, cmd)
             if len(found_files) == 1:
                 try:
