@@ -482,15 +482,80 @@ class JarvisAgent:
             name = name.replace(ch, " ")
         return " ".join(name.split())
 
+    def _normalize_name_flat(self, name):
+        """Normalize and remove ALL spaces — handles 'triblesetu' vs 'trible setu'."""
+        return self._normalize_name(name).replace(" ", "")
+
+    _HOMOPHONE_MAP = {
+        "too": "2", "to": "2", "two": "2",
+        "for": "4", "four": "4",
+        "u": "you", "ur": "your", "r": "are",
+    }
+
+    def _apply_homophones(self, name):
+        """Replace common voice-to-text homophones (too→2, for→4, etc.)."""
+        words = name.split()
+        words = [self._HOMOPHONE_MAP.get(w, w) for w in words]
+        return " ".join(words)
+
     def _find_file_by_name(self, folders, target):
-        """Search folders for files whose normalized name matches normalized target.
-        Returns list of matching paths (may contain multiple if ambiguous)."""
+        """Search folders for files AND folders whose normalized name matches normalized target.
+        Returns list of matching paths (may contain multiple if ambiguous).
+
+        Matching strategies (in order):
+          1. Exact normalized match (stem or full filename)
+          2. Flat match (spaces removed) — handles 'triblesetu' vs 'trible setu'
+             Also substring: 'triblesetu' matches 'triblesetunotes'
+          3. Homophone match (too→2, for→4, etc.) — handles 'dbms too' vs 'dbms 2'
+          4. difflib similarity fallback (>= 0.90) — only if NO exact/flat/homophone match found
+        """
+        import difflib
+
         target_norm = self._normalize_name(target)
+        target_flat = self._normalize_name_flat(target)
+        target_homo = self._normalize_name(self._apply_homophones(target))
+        target_homo_flat = self._normalize_name_flat(self._apply_homophones(target))
+        if not target_norm and not target_flat:
+            return []
         # Also try matching against full filename (with extension) in case user said "file.pdf"
         target_full_norm = self._normalize_name(os.path.basename(target))
-        if not target_norm and not target_full_norm:
-            return []
+        target_full_flat = self._normalize_name_flat(os.path.basename(target))
+
+        def _entry_candidates(fname):
+            stem = os.path.splitext(fname)[0]
+            return [
+                self._normalize_name(stem),
+                self._normalize_name_flat(stem),
+                self._normalize_name(self._apply_homophones(stem)),
+                self._normalize_name_flat(self._apply_homophones(stem)),
+                self._normalize_name(fname),
+                self._normalize_name_flat(fname),
+                self._normalize_name(self._apply_homophones(fname)),
+                self._normalize_name_flat(self._apply_homophones(fname)),
+            ]
+
+        def _is_exact_match(cands):
+            for c in cands:
+                if not c:
+                    continue
+                # Exact equality
+                if c == target_norm or c == target_full_norm:
+                    return True
+                # Flat equality
+                if c == target_flat or c == target_full_flat:
+                    return True
+                # Flat substring — user's short name inside real file name ('triblesetu' inside 'triblesetunotes')
+                # Only one direction: target inside candidate, not reverse (avoids 'dbms' matching 'dbms 2')
+                if target_flat and target_flat in c:
+                    return True
+                # Homophone equality
+                if c == target_homo or c == target_homo_flat:
+                    return True
+            return False
+
+        # Pass 1: exact / flat / homophone matches
         matches = []
+        seen = set()
         for folder in folders:
             if not os.path.isdir(folder):
                 continue
@@ -500,13 +565,34 @@ class JarvisAgent:
                 continue
             for fname in entries:
                 fpath = os.path.join(folder, fname)
-                if not os.path.isfile(fpath):
+                if not os.path.isfile(fpath) and not os.path.isdir(fpath):
                     continue
-                stem = os.path.splitext(fname)[0]
-                stem_norm = self._normalize_name(stem)
-                full_norm = self._normalize_name(fname)
-                if stem_norm == target_norm or full_norm == target_full_norm:
+                if fpath in seen:
+                    continue
+                if _is_exact_match(_entry_candidates(fname)):
                     matches.append(fpath)
+                    seen.add(fpath)
+
+        # Pass 2: difflib fallback ONLY if pass 1 found nothing
+        if not matches:
+            for folder in folders:
+                if not os.path.isdir(folder):
+                    continue
+                try:
+                    entries = os.listdir(folder)
+                except Exception:
+                    continue
+                for fname in entries:
+                    fpath = os.path.join(folder, fname)
+                    if not os.path.isfile(fpath) and not os.path.isdir(fpath):
+                        continue
+                    if fpath in seen:
+                        continue
+                    for c in _entry_candidates(fname):
+                        if c and difflib.SequenceMatcher(None, target_norm, c).ratio() >= 0.90:
+                            matches.append(fpath)
+                            seen.add(fpath)
+                            break
         return matches
 
     def open_file_from_location(self, location, filename):
