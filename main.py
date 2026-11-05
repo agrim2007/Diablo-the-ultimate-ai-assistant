@@ -5,8 +5,10 @@ Features: Voice STT, TTS, LLM, System automation
 import os
 import sys
 import json
+import glob
 import subprocess
 import webbrowser
+import winreg
 import platform
 import yaml
 import contextlib
@@ -54,6 +56,13 @@ class JarvisAgent:
         self.name = self.config.get("agent", {}).get("name", "Jarvis")
         self.wake_phrase = self.config.get("wake_word", {}).get("phrase", "hey jarvis").lower()
         self.wake_enabled = self.config.get("wake_word", {}).get("enabled", True)
+
+        # Installed apps survey (Start Menu shortcuts + registry uninstall)
+        self.app_map = {}
+        try:
+            self.app_map = self._scan_installed_apps()
+        except Exception:
+            self.app_map = {}
 
         self.recognizer = sr.Recognizer()
         try:
@@ -349,6 +358,144 @@ class JarvisAgent:
         webbrowser.open(url)
         return f"Opening {display_site}"
 
+    # ------------------------------------------------------------------
+    # Installed apps survey (PC-wide) — so any app name works by voice
+    # ------------------------------------------------------------------
+    def _scan_installed_apps(self):
+        app_map = {}
+        for pattern in [
+            os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs\**\*.lnk"),
+            os.path.expandvars(r"%PROGRAMDATA%\Microsoft\Windows\Start Menu\Programs\**\*.lnk"),
+        ]:
+            try:
+                for lnk in glob.glob(pattern, recursive=True):
+                    name = os.path.splitext(os.path.basename(lnk))[0].lower()
+                    if name:
+                        app_map.setdefault(name, lnk)
+            except Exception:
+                continue
+        for hive, subkey in [
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+            (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+        ]:
+            try:
+                with winreg.OpenKey(hive, subkey) as key:
+                    for i in range(winreg.QueryInfoKey(key)[0]):
+                        try:
+                            sub = winreg.EnumKey(key, i)
+                            with winreg.OpenKey(key, sub) as k:
+                                try:
+                                    dname = winreg.QueryValueEx(k, "DisplayName")[0]
+                                except FileNotFoundError:
+                                    continue
+                                if not dname:
+                                    continue
+                                name = dname.lower()
+                                if name in app_map:
+                                    continue
+                                path = None
+                                try:
+                                    loc = winreg.QueryValueEx(k, "InstallLocation")[0]
+                                    if loc and os.path.exists(loc):
+                                        path = loc
+                                except FileNotFoundError:
+                                    pass
+                                if not path:
+                                    try:
+                                        ico = winreg.QueryValueEx(k, "DisplayIcon")[0]
+                                        p = ico.split(",")[0].strip().strip('"')
+                                        if os.path.exists(p):
+                                            path = p
+                                    except FileNotFoundError:
+                                        pass
+                                if path:
+                                    # Skip driver / component GUID folders — not user-launchable apps
+                                    if "{" in path and "}" in path:
+                                        continue
+                                    skip_keywords = [
+                                        "driver", "update", "redistributable",
+                                        "c++", ".net", "visual c++", "runtime",
+                                        "setup", "installer", "uninstall",
+                                    ]
+                                    if any(k in name for k in skip_keywords):
+                                        continue
+                                    app_map[name] = path
+                                    app_map[name.replace(" ", "")] = path
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+        return app_map
+
+    def find_app(self, name):
+        name = name.lower().strip()
+        if not name:
+            return None
+        # 1) Exact match
+        if name in self.app_map:
+            return self.app_map[name]
+        # 2) Whole-word match: every word of command present in app name
+        words = name.split()
+        for app_name, path in self.app_map.items():
+            if "{" in path and "}" in path:
+                continue  # skip GUID driver folders
+            if all(w in app_name for w in words) or app_name in name:
+                return path
+        # 3) Loose substring match (last resort), still skip GUIDs
+        for app_name, path in self.app_map.items():
+            if "{" in path and "}" in path:
+                continue
+            if app_name in name or name in app_name:
+                return path
+        return None
+
+    def open_app_path(self, path):
+        try:
+            if os.path.isdir(path):
+                os.startfile(path)
+                return f"Opening {os.path.basename(path) or path}."
+            os.startfile(path)
+            return f"Opening {os.path.basename(path)}."
+        except Exception as e:
+            return f"Failed to open app: {e}"
+
+    def _user_folder(self, folder):
+        return os.path.expandvars(f"%USERPROFILE%\\{folder}")
+
+    def open_file_from_location(self, location, filename):
+        folder = self._user_folder("Desktop" if location == "desktop" else "Downloads")
+        filepath = os.path.join(folder, filename)
+        if not os.path.exists(filepath):
+            for ext in [".pdf", ".docx", ".doc", ".txt", ".xlsx", ".pptx", ".jpg", ".png", ".zip", ".mp4", ".mp3"]:
+                if os.path.exists(filepath + ext):
+                    filepath = filepath + ext
+                    break
+            else:
+                return f"Sorry, I couldn't find {filename} in {location}."
+        try:
+            os.startfile(filepath)
+            return f"Opening {filename} from {location}."
+        except Exception as e:
+            return f"Failed to open file: {e}"
+
+    def open_latest_downloads(self):
+        folder = self._user_folder("Downloads")
+        if not os.path.isdir(folder):
+            return "Downloads folder not found."
+        files = [
+            os.path.join(folder, f)
+            for f in os.listdir(folder)
+            if os.path.isfile(os.path.join(folder, f))
+        ]
+        if not files:
+            return "Downloads folder is empty."
+        latest = max(files, key=os.path.getmtime)
+        try:
+            os.startfile(latest)
+            return f"Opening latest file: {os.path.basename(latest)}."
+        except Exception as e:
+            return f"Failed to open latest file: {e}"
+
     def system_info(self):
         cpu = psutil.cpu_percent()
         mem = psutil.virtual_memory().percent
@@ -380,13 +527,37 @@ class JarvisAgent:
         if not command:
             return f"Yes, I am listening. How can I help you?"
         if "open" in command:
+            cmd = command.replace("open", "", 1).strip()
+
+            # 1) File from Desktop / Downloads / latest downloads
+            if "from desktop" in cmd:
+                target = cmd.replace("from desktop", "").strip()
+                if target:
+                    return self.open_file_from_location("desktop", target)
+                return "Please specify the file name."
+            if "from downloads" in cmd:
+                target = cmd.replace("from downloads", "").strip()
+                if "latest" in target:
+                    return self.open_latest_downloads()
+                if target:
+                    return self.open_file_from_location("downloads", target)
+                return "Please specify the file name."
+            if "latest file from downloads" in cmd or "latest download" in cmd:
+                return self.open_latest_downloads()
+
+            # 2) Installed app (from PC survey — any app name works)
+            app_path = self.find_app(cmd)
+            if app_path:
+                return self.open_app_path(app_path)
+
+            # 3) Hardcoded fallback apps
             for app in ["notepad", "calculator", "calc", "chrome", "browser", "command prompt", "cmd", "task manager"]:
-                if app in command:
-                    return self.open_app(command.replace("open", "").replace(app, "").strip() or app)
-            # Koi bhi website kholein: "open flipkart", "open nvidia", "open flipkart.com" etc.
-            site = command.replace("open", "", 1).strip()
+                if app in cmd:
+                    return self.open_app(cmd.replace(app, "").strip() or app)
+
+            # 4) Website fallback: "open flipkart", "open nvidia", etc.
             fillers = {"website", "site", "the", "a", "an", "please"}
-            site = " ".join(w for w in site.split() if w.lower() not in fillers).strip()
+            site = " ".join(w for w in cmd.split() if w.lower() not in fillers).strip()
             if site:
                 return self.open_website(site)
             return "Please specify what you want to open."
