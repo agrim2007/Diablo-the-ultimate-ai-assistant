@@ -463,9 +463,15 @@ class JarvisAgent:
         return os.path.expandvars(f"%USERPROFILE%\\{folder}")
 
     def open_file_from_location(self, location, filename):
-        folder = self._user_folder("Desktop" if location == "desktop" else "Downloads")
-        filepath = os.path.join(folder, filename)
+        # Full absolute path given directly — open it as-is
+        if os.path.isabs(filename) or (":" in filename) or ("\\" in filename):
+            filepath = filename
+        else:
+            folder = self._user_folder("Desktop" if location == "desktop" else "Downloads")
+            filepath = os.path.join(folder, filename)
         if not os.path.exists(filepath):
+            if os.path.isabs(filename) or (":" in filename) or ("\\" in filename):
+                return f"Sorry, I couldn't find that file at {filename}."
             for ext in [".pdf", ".docx", ".doc", ".txt", ".xlsx", ".pptx", ".jpg", ".png", ".zip", ".mp4", ".mp3"]:
                 if os.path.exists(filepath + ext):
                     filepath = filepath + ext
@@ -474,7 +480,7 @@ class JarvisAgent:
                 return f"Sorry, I couldn't find {filename} in {location}."
         try:
             os.startfile(filepath)
-            return f"Opening {filename} from {location}."
+            return f"Opening {os.path.basename(filepath)} from {location}."
         except Exception as e:
             return f"Failed to open file: {e}"
 
@@ -528,6 +534,16 @@ class JarvisAgent:
             return f"Yes, I am listening. How can I help you?"
         if "open" in command:
             cmd = command.replace("open", "", 1).strip()
+            if not cmd:
+                return "Please specify what you want to open."
+
+            # 0) Full path given directly — open it as-is
+            if (":" in cmd or "\\" in cmd or "/" in cmd) and os.path.exists(cmd):
+                try:
+                    os.startfile(cmd)
+                    return f"Opening {os.path.basename(cmd)}."
+                except Exception as e:
+                    return f"Failed to open file: {e}"
 
             # 1) File from Desktop / Downloads / latest downloads
             if "from desktop" in cmd:
@@ -545,6 +561,33 @@ class JarvisAgent:
             if "latest file from downloads" in cmd or "latest download" in cmd:
                 return self.open_latest_downloads()
 
+            # 1b) Plain filename — search common user folders (Desktop, Downloads, Documents)
+            common_folders = [
+                self._user_folder("Desktop"),
+                self._user_folder("Downloads"),
+                self._user_folder("Documents"),
+            ]
+            found_file = None
+            for folder in common_folders:
+                if not os.path.isdir(folder):
+                    continue
+                fp = os.path.join(folder, cmd)
+                if os.path.exists(fp):
+                    found_file = fp
+                    break
+                for ext in [".pdf", ".docx", ".doc", ".txt", ".xlsx", ".pptx", ".jpg", ".png", ".zip", ".mp4", ".mp3"]:
+                    if os.path.exists(fp + ext):
+                        found_file = fp + ext
+                        break
+                if found_file:
+                    break
+            if found_file:
+                try:
+                    os.startfile(found_file)
+                    return f"Opening {os.path.basename(found_file)}."
+                except Exception as e:
+                    return f"Failed to open file: {e}"
+
             # 2) Installed app (from PC survey — any app name works)
             app_path = self.find_app(cmd)
             if app_path:
@@ -555,12 +598,15 @@ class JarvisAgent:
                 if app in cmd:
                     return self.open_app(cmd.replace(app, "").strip() or app)
 
-            # 4) Website fallback: "open flipkart", "open nvidia", etc.
-            fillers = {"website", "site", "the", "a", "an", "please"}
-            site = " ".join(w for w in cmd.split() if w.lower() not in fillers).strip()
-            if site:
-                return self.open_website(site)
-            return "Please specify what you want to open."
+            # 4) Website fallback — only if it looks like a real domain OR user said website/site
+            domain_hints = [".com", ".in", ".org", ".net", ".edu", ".gov", "www.", ".co", ".io"]
+            is_website_cmd = any(h in cmd for h in domain_hints) or ("website" in cmd) or ("site" in cmd)
+            if is_website_cmd:
+                fillers = {"website", "site", "the", "a", "an", "please"}
+                site = " ".join(w for w in cmd.split() if w.lower() not in fillers).strip()
+                if site:
+                    return self.open_website(site)
+            return "Sorry, I couldn't find that app or file on your PC."
         if "time" in command or "date" in command:
             return self.ask_llm(command)
         if "shutdown" in command:
