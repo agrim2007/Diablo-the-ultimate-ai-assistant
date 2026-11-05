@@ -460,7 +460,12 @@ class JarvisAgent:
             return f"Failed to open app: {e}"
 
     def _user_folder(self, folder):
-        return os.path.expandvars(f"%USERPROFILE%\\{folder}")
+        # Windows OneDrive may redirect Desktop/Downloads/Documents — try both
+        default_path = os.path.expandvars(f"%USERPROFILE%\\{folder}")
+        onedrive_path = os.path.expandvars(f"%USERPROFILE%\\OneDrive\\{folder}")
+        if os.path.isdir(onedrive_path):
+            return onedrive_path
+        return default_path
 
     def _normalize_name(self, name):
         """Lowercase and strip special chars so voice-transcribed names match real files."""
