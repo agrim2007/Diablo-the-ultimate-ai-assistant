@@ -537,6 +537,15 @@ class JarvisAgent:
             if not cmd:
                 return "Please specify what you want to open."
 
+            # STT typo normalization: "form download" → "from downloads", etc.
+            cmd = cmd.replace(" form ", " from ").replace("form ", "from ")
+            if "from download" in cmd and "from downloads" not in cmd:
+                cmd = cmd.replace("from download", "from downloads")
+            if "dowload" in cmd and "downloads" not in cmd:
+                cmd = cmd.replace("dowload", "downloads")
+            if "deskto" in cmd and "desktop" not in cmd:
+                cmd = cmd.replace("deskto", "desktop")
+
             # 0) Full path given directly — open it as-is
             if (":" in cmd or "\\" in cmd or "/" in cmd) and os.path.exists(cmd):
                 try:
