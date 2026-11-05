@@ -474,7 +474,9 @@ class JarvisAgent:
         """Search folders for files whose normalized name matches normalized target.
         Returns list of matching paths (may contain multiple if ambiguous)."""
         target_norm = self._normalize_name(target)
-        if not target_norm:
+        # Also try matching against full filename (with extension) in case user said "file.pdf"
+        target_full_norm = self._normalize_name(os.path.basename(target))
+        if not target_norm and not target_full_norm:
             return []
         matches = []
         for folder in folders:
@@ -490,7 +492,8 @@ class JarvisAgent:
                     continue
                 stem = os.path.splitext(fname)[0]
                 stem_norm = self._normalize_name(stem)
-                if stem_norm == target_norm:
+                full_norm = self._normalize_name(fname)
+                if stem_norm == target_norm or full_norm == target_full_norm:
                     matches.append(fpath)
         return matches
 
