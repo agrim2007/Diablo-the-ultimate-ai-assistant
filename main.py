@@ -471,10 +471,12 @@ class JarvisAgent:
         return " ".join(name.split())
 
     def _find_file_by_name(self, folders, target):
-        """Search folders for a file whose normalized name matches normalized target."""
+        """Search folders for files whose normalized name matches normalized target.
+        Returns list of matching paths (may contain multiple if ambiguous)."""
         target_norm = self._normalize_name(target)
         if not target_norm:
-            return None
+            return []
+        matches = []
         for folder in folders:
             if not os.path.isdir(folder):
                 continue
@@ -482,8 +484,6 @@ class JarvisAgent:
                 entries = os.listdir(folder)
             except Exception:
                 continue
-            best = None
-            best_len = 0
             for fname in entries:
                 fpath = os.path.join(folder, fname)
                 if not os.path.isfile(fpath):
@@ -491,13 +491,8 @@ class JarvisAgent:
                 stem = os.path.splitext(fname)[0]
                 stem_norm = self._normalize_name(stem)
                 if stem_norm == target_norm:
-                    return fpath  # exact normalized match — return immediately
-                if target_norm in stem_norm and len(stem_norm) > best_len:
-                    best = fpath
-                    best_len = len(stem_norm)
-            if best:
-                return best
-        return None
+                    matches.append(fpath)
+        return matches
 
     def open_file_from_location(self, location, filename):
         # Full absolute path given directly — open it as-is
@@ -510,9 +505,12 @@ class JarvisAgent:
             if os.path.isabs(filename) or (":" in filename) or ("\\" in filename):
                 return f"Sorry, I couldn't find that file at {filename}."
             # Fuzzy match: ignore &, _, -, (, ), etc. between spoken name and real filename
-            fuzzy = self._find_file_by_name([os.path.dirname(filepath)], filename)
-            if fuzzy:
-                filepath = fuzzy
+            fuzzy_matches = self._find_file_by_name([os.path.dirname(filepath)], filename)
+            if len(fuzzy_matches) == 1:
+                filepath = fuzzy_matches[0]
+            elif len(fuzzy_matches) > 1:
+                names = ", ".join(os.path.basename(m) for m in fuzzy_matches)
+                return f"Multiple files match '{filename}': {names}. Please specify extension (e.g. pdf or docx)."
             else:
                 for ext in [".pdf", ".docx", ".doc", ".txt", ".xlsx", ".pptx", ".jpg", ".png", ".zip", ".mp4", ".mp3"]:
                     if os.path.exists(filepath + ext):
@@ -618,13 +616,16 @@ class JarvisAgent:
                 self._user_folder("Downloads"),
                 self._user_folder("Documents"),
             ]
-            found_file = self._find_file_by_name(common_folders, cmd)
-            if found_file:
+            found_files = self._find_file_by_name(common_folders, cmd)
+            if len(found_files) == 1:
                 try:
-                    os.startfile(found_file)
-                    return f"Opening {os.path.basename(found_file)}."
+                    os.startfile(found_files[0])
+                    return f"Opening {os.path.basename(found_files[0])}."
                 except Exception as e:
                     return f"Failed to open file: {e}"
+            elif len(found_files) > 1:
+                names = ", ".join(os.path.basename(m) for m in found_files)
+                return f"Multiple files match '{cmd}': {names}. Please specify extension (e.g. pdf or docx)."
 
             # 2) Installed app (from PC survey — any app name works)
             app_path = self.find_app(cmd)
