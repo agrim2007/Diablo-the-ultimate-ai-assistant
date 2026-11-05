@@ -55,24 +55,15 @@ class JarvisAgent:
         self.wake_phrase = self.config.get("wake_word", {}).get("phrase", "hey jarvis").lower()
         self.wake_enabled = self.config.get("wake_word", {}).get("enabled", True)
 
-        # Initialize TTS and microphone without ALSA warning spam
-        with suppress_c_stderr():
-            self.tts = pyttsx3.init()
-            self.recognizer = sr.Recognizer()
+        self.recognizer = sr.Recognizer()
+        try:
             self.microphone = sr.Microphone()
-
-        self.tts.setProperty("rate", self.config.get("agent", {}).get("rate", 180))
-        self.tts.setProperty("volume", self.config.get("agent", {}).get("volume", 1.0))
-
-        # TTS voice selection
-        tts_voice_id = self.config.get("agent", {}).get("voice_id")
-        if tts_voice_id:
-            try:
-                self.tts.setProperty("voice", tts_voice_id)
-            except Exception:
-                pass
-        # List available voices for reference
-        self._available_voices = self.tts.getProperty("voices")
+            self._mic_available = True
+        except Exception as e:
+            print(f"? Microphone not available: {e}")
+            print("   Falling back to text input mode.")
+            self.microphone = None
+            self._mic_available = False
 
         self.llm_provider = self.config.get("llm", {}).get("provider", "ollama")
         self.llm_model = self.config.get("llm", {}).get("model", "llama3")
@@ -97,9 +88,20 @@ class JarvisAgent:
 
     def speak(self, text):
         print(f"??? {self.name}: {text}")
-        with suppress_c_stderr():
-            self.tts.say(text)
-            self.tts.runAndWait()
+        try:
+            engine = pyttsx3.init(driverName="sapi5")
+            engine.setProperty("rate", self.config.get("agent", {}).get("rate", 180))
+            engine.setProperty("volume", self.config.get("agent", {}).get("volume", 1.0))
+            tts_voice_id = self.config.get("agent", {}).get("voice_id")
+            if tts_voice_id:
+                try:
+                    engine.setProperty("voice", tts_voice_id)
+                except Exception:
+                    pass
+            engine.say(text)
+            engine.runAndWait()
+        except Exception as e:
+            print(f"? TTS error: {e}")
 
     def _get_whisper_model(self):
         """Lazy-load the Whisper model only when needed."""
@@ -151,6 +153,12 @@ class JarvisAgent:
             return ""
 
     def listen(self, timeout=5, phrase_time_limit=7):
+        if not self._mic_available:
+            # Text input fallback when microphone is not available
+            try:
+                return input("You (type): ").strip().lower()
+            except EOFError:
+                return ""
         with suppress_c_stderr():
             with self.microphone as source:
                 print("?? Listening...")
@@ -326,14 +334,20 @@ class JarvisAgent:
 
     def open_website(self, site):
         site = site.lower().strip()
+        # Jo bola jayega: agar pehle se .com/domain nahi hai toh .com jod dein taaki clean sune
+        if "." not in site:
+            display_site = site + ".com"
+        else:
+            display_site = site
         if not site.startswith("http"):
-            # If it already looks like a domain (has a dot), don't append .com again
             if "." in site:
-                site = "https://www." + site
+                url = "https://www." + site
             else:
-                site = "https://www." + site + ".com"
-        webbrowser.open(site)
-        return f"Opening {site}"
+                url = "https://www." + site + ".com"
+        else:
+            url = site
+        webbrowser.open(url)
+        return f"Opening {display_site}"
 
     def system_info(self):
         cpu = psutil.cpu_percent()
@@ -357,8 +371,11 @@ class JarvisAgent:
             elif self.name.lower() in text:
                 # STT often drops the "hey" — accept the agent name alone
                 wake_token = self.name.lower()
+        else:
+            # Wake word disabled — process command directly
+            wake_token = ""
         if wake_token is None:
-            return None
+            wake_token = ""
         command = text.replace(wake_token, "", 1).strip()
         if not command:
             return f"Yes, I am listening. How can I help you?"
@@ -366,8 +383,12 @@ class JarvisAgent:
             for app in ["notepad", "calculator", "calc", "chrome", "browser", "command prompt", "cmd", "task manager"]:
                 if app in command:
                     return self.open_app(command.replace("open", "").replace(app, "").strip() or app)
-            if any(w in command for w in ["website", "site", "google", "youtube", "facebook"]):
-                return self.open_web_from_text(command)
+            # Koi bhi website kholein: "open flipkart", "open nvidia", "open flipkart.com" etc.
+            site = command.replace("open", "", 1).strip()
+            fillers = {"website", "site", "the", "a", "an", "please"}
+            site = " ".join(w for w in site.split() if w.lower() not in fillers).strip()
+            if site:
+                return self.open_website(site)
             return "Please specify what you want to open."
         if "time" in command or "date" in command:
             return self.ask_llm(command)
@@ -378,15 +399,6 @@ class JarvisAgent:
         if "system info" in command or "cpu" in command or "memory" in command:
             return self.system_info()
         return self.ask_llm(command)
-
-    def open_web_from_text(self, text):
-        if "google" in text:
-            return self.open_website("google.com")
-        if "youtube" in text:
-            return self.open_website("youtube.com")
-        if "facebook" in text:
-            return self.open_website("facebook.com")
-        return self.open_website(text)
 
     def run(self):
         self.speak(f"Hello! I am {self.name}. Your personal AI assistant is ready.")
